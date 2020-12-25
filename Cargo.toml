@@ -7,16 +7,16 @@ authors = ["Dylan Ede <dylanede@googlemail.com>"]
 [dependencies]
 bitflags = "0.1"
 num = "0.1"
-num-macros = "0.1"
+libc = "0.2.81"
+num-derive = "0.3"
+num-traits = "0.2"
 
 [dependencies.cef-sys]
 path = "cef-sys"
 
 [dependencies.callc]
-git = "https://github.com/dylanede/callc.git"
+git = "https://github.com/lynnux/callc.git"
 
-[target.x86_64-pc-windows-gnu.dependencies]
-kernel32-sys = "*"
 
-[target.x86-pc-windows-gnu.dependencies]
-kernel32-sys = "*"
+[target.'cfg(windows)'.dependencies]
+winapi = {version = "0.3", features =["libloaderapi"]}

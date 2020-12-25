@@ -1,66 +1,43 @@
-#![feature(box_syntax,
-           libc,
-           alloc,
-           plugin,
-           unsafe_no_drop_flag,
-           filling_drop,
-           str_utf16,
-           heap_api,
-           oom,
-           custom_derive,
-           associated_type_defaults)]
-#![plugin(callc)]
-#![plugin(num_macros)]
+#![feature(box_syntax, associated_type_defaults)]
 extern crate cef_sys as ffi;
 #[macro_use]
 extern crate bitflags;
-extern crate num;
 extern crate libc;
-extern crate alloc;
-
-#[cfg(target_os="windows")]
-extern crate kernel32;
-
+extern crate num;
+#[macro_use]
+extern crate callc;
+#[macro_use]
+extern crate num_derive;
 pub enum Void {}
 
-use std::mem::{transmute, drop, size_of, zeroed};
-use std::ops::{Deref, DerefMut};
 use std::default::Default;
+use std::mem::{drop, size_of, transmute, zeroed};
+use std::ops::{Deref, DerefMut};
 
 mod app;
-pub mod string;
-mod browser_client;
 mod browser;
+mod browser_client;
 mod browser_host;
+pub mod string;
 
 pub use app::App;
 pub use app::AppWrapper;
-pub use browser_client::{BrowserClient, BrowserClientWrapper};
-pub use browser_client::render_handler::{
-    Rect,
-    Point,
-    Size,
-    CursorHandle,
-    DragOperationsMask,
-    RenderHandler,
-    RenderHandlerWrapper,
-    PaintElementType,
-    CursorDirection,
-    CursorBidirection,
-    Cursor,
-    CustomCursorInfo,
-};
 pub use browser::Browser;
+pub use browser_client::render_handler::{
+    Cursor, CursorBidirection, CursorDirection, CursorHandle, CustomCursorInfo, DragOperationsMask,
+    PaintElementType, Point, Rect, RenderHandler, RenderHandlerWrapper, Size,
+};
+pub use browser_client::{BrowserClient, BrowserClientWrapper};
+pub use browser_host::event_flags::EventFlags;
 pub use browser_host::BrowserHost;
 pub use browser_host::BrowserSettings;
-pub use browser_host::{event_flags, MouseEvent, MouseButtonType};
 pub use browser_host::Modifiers;
-pub use browser_host::event_flags::EventFlags;
+pub use browser_host::{event_flags, MouseButtonType, MouseEvent};
 pub use string::CefString;
 
 pub enum ProcessID {
     Browser,
-    Renderer
+    Renderer,
 }
 
 pub struct ProcessMessage;
@@ -71,7 +48,7 @@ unsafe impl Interface<ffi::cef_process_message_t> for ProcessMessage {}
 pub enum State {
     Default,
     Enabled,
-    Disabled
+    Disabled,
 }
 
 pub fn shutdown() {
@@ -79,16 +56,15 @@ pub fn shutdown() {
 }
 
 #[repr(C)]
-#[unsafe_no_drop_flag]
 pub struct CefRc<T: Is<ffi::cef_base_t>> {
-    inner: *mut T
+    inner: *mut T,
 }
 
 pub unsafe trait Is<T> {}
 pub unsafe trait Interface<T> {}
 
 unsafe impl Is<ffi::cef_base_t> for ffi::cef_base_t {}
-trait CefBase : Is<ffi::cef_base_t> {
+trait CefBase: Is<ffi::cef_base_t> {
     fn add_ref(&mut self);
     fn release(&mut self) -> libc::c_int;
 }
@@ -107,22 +83,22 @@ impl<T: Is<ffi::cef_base_t>> CefBase for T {
 impl<T: Is<ffi::cef_base_t>> CefRc<T> {
     fn make<F: FnOnce(ffi::cef_base_t) -> T>(f: F) -> CefRc<T> {
         use std::mem::size_of;
+        use std::sync::atomic;
         use std::sync::atomic::AtomicUsize;
         use std::sync::atomic::Ordering;
-        use std::sync::atomic;
 
         //println!("making {:?}", size_of::<T>());
         #[repr(C)]
         struct RefCounted<T> {
             v: T,
-            count: AtomicUsize
+            count: AtomicUsize,
         }
         unsafe impl<T> Is<ffi::cef_base_t> for RefCounted<T> {}
 
         #[stdcall_win]
         extern "C" fn add_ref<T>(_self: *mut ffi::cef_base_t) {
             //println!("add {:?}", size_of::<T>());
-            let cell: &mut RefCounted<T> = unsafe{ unsafe_downcast_mut(&mut *_self) };
+            let cell: &mut RefCounted<T> = unsafe { unsafe_downcast_mut(&mut *_self) };
             cell.count.fetch_add(1, Ordering::Relaxed);
         }
         #[stdcall_win]
@@ -137,24 +113,34 @@ impl<T: Is<ffi::cef_base_t>> CefRc<T> {
                     let cell: Box<RefCounted<T>> = transmute(cell);
                     drop(cell);
                 }
-                if old_count == 1 { 1 } else { 0 }
+                if old_count == 1 {
+                    1
+                } else {
+                    0
+                }
             }
         }
         #[stdcall_win]
         extern "C" fn has_one_ref<T>(_self: *mut ffi::cef_base_t) -> libc::c_int {
-            let cell: &mut RefCounted<T> = unsafe{ unsafe_downcast_mut(&mut *_self) };
-            if cell.count.load(Ordering::SeqCst) == 1 { 1 } else { 0 }
+            let cell: &mut RefCounted<T> = unsafe { unsafe_downcast_mut(&mut *_self) };
+            if cell.count.load(Ordering::SeqCst) == 1 {
+                1
+            } else {
+                0
+            }
         }
         CefRc {
-            inner: unsafe { transmute(box RefCounted {
-                v: f(ffi::cef_base_t {
-                    size: size_of::<RefCounted<T>>() as libc::size_t,
-                    add_ref: Some(add_ref::<T>),
-                    release: Some(release::<T>),
-                    has_one_ref: Some(has_one_ref::<T>)
-                }),
-                count: AtomicUsize::new(1)
-            })}
+            inner: unsafe {
+                transmute(box RefCounted {
+                    v: f(ffi::cef_base_t {
+                        size: size_of::<RefCounted<T>>() as libc::size_t,
+                        add_ref: Some(add_ref::<T>),
+                        release: Some(release::<T>),
+                        has_one_ref: Some(has_one_ref::<T>),
+                    }),
+                    count: AtomicUsize::new(1),
+                })
+            },
         }
     }
     pub fn from_existing(ptr: *mut T) -> CefRc<T> {
@@ -166,47 +152,59 @@ impl<T: Is<ffi::cef_base_t>> Deref for CefRc<T> {
     type Target = T;
 
     fn deref<'a>(&'a self) -> &'a T {
-        unsafe{ &*self.inner }
+        unsafe { &*self.inner }
     }
 }
 
 impl<T: Is<ffi::cef_base_t>> DerefMut for CefRc<T> {
     fn deref_mut<'a>(&'a mut self) -> &'a mut T {
-        unsafe{ &mut *self.inner }
+        unsafe { &mut *self.inner }
     }
 }
 
-unsafe fn unsafe_downcast_mut<'a, T1, T2 : Is<T1>>(x: &'a mut T1) -> &'a mut T2 {
+unsafe fn unsafe_downcast_mut<'a, T1, T2: Is<T1>>(x: &'a mut T1) -> &'a mut T2 {
     transmute(x)
 }
-fn upcast_mut<'a, T1 : Is<T2>, T2>(x: &'a mut T1) -> &'a mut T2 {
-    unsafe{ transmute(x) }
+fn upcast_mut<'a, T1: Is<T2>, T2>(x: &'a mut T1) -> &'a mut T2 {
+    unsafe { transmute(x) }
 }
-fn upcast<'a, T1 : Is<T2>, T2>(x: &'a T1) -> &'a T2 {
-    unsafe{ transmute(x) }
-}
-
-fn upcast_ptr<T1 : Is<T2>, T2>(x: CefRc<T1>) -> *mut T2 where T1 : Is<ffi::cef_base_t> {
+fn upcast<'a, T1: Is<T2>, T2>(x: &'a T1) -> &'a T2 {
     unsafe { transmute(x) }
 }
 
-unsafe fn unsafe_downcast_ptr<T1, T2 : Is<T1>>(x: *mut T1) -> CefRc<T2> where T2 : Is<ffi::cef_base_t> {
+fn upcast_ptr<T1: Is<T2>, T2>(x: CefRc<T1>) -> *mut T2
+where
+    T1: Is<ffi::cef_base_t>,
+{
+    unsafe { transmute(x) }
+}
+
+unsafe fn unsafe_downcast_ptr<T1, T2: Is<T1>>(x: *mut T1) -> CefRc<T2>
+where
+    T2: Is<ffi::cef_base_t>,
+{
     transmute(x)
 }
 
-fn cast_ref<'a, T1, T2 : Interface<T1>>(x: &'a T1) -> &'a T2 {
-    unsafe{ transmute(x) }
+fn cast_ref<'a, T1, T2: Interface<T1>>(x: &'a T1) -> &'a T2 {
+    unsafe { transmute(x) }
 }
 
-fn cast_mut_ref<'a, T1, T2 : Interface<T1>>(x: &'a mut T1) -> &'a mut T2 {
-    unsafe{ transmute(x) }
+fn cast_mut_ref<'a, T1, T2: Interface<T1>>(x: &'a mut T1) -> &'a mut T2 {
+    unsafe { transmute(x) }
 }
 
-fn cast_to_interface<T1, T2 : Interface<T1>>(x: *mut T1) -> CefRc<T2> where T2 : Is<ffi::cef_base_t> {
-    unsafe{ transmute(x) }
+fn cast_to_interface<T1, T2: Interface<T1>>(x: *mut T1) -> CefRc<T2>
+where
+    T2: Is<ffi::cef_base_t>,
+{
+    unsafe { transmute(x) }
 }
 
-fn cast_from_interface<T1, T2 : Interface<T1>>(x: CefRc<T2>) -> *mut T1 where T2 : Is<ffi::cef_base_t> {
+fn cast_from_interface<T1, T2: Interface<T1>>(x: CefRc<T2>) -> *mut T1
+where
+    T2: Is<ffi::cef_base_t>,
+{
     unsafe { transmute(x) }
 }
 
@@ -214,24 +212,24 @@ fn cast_from_interface<T1, T2 : Interface<T1>>(x: CefRc<T2>) -> *mut T1 where T2
 #[derive(Copy, Clone)]
 pub enum CBool {
     False = 0,
-    True = 1
+    True = 1,
 }
 pub use CBool::*;
 impl CBool {
     pub fn new(v: bool) -> CBool {
         match v {
             true => True,
-            false => False
+            false => False,
         }
     }
     pub fn set(&mut self, v: bool) {
         *self = match v {
             true => True,
-            false => False
+            false => False,
         }
     }
     pub fn to_cef(self) -> libc::c_int {
-        unsafe{ transmute(self) }
+        unsafe { transmute(self) }
     }
 }
 
@@ -249,7 +247,9 @@ pub struct Settings<'a> {
     pub windowless_rendering_enabled: bool,
     pub command_line_args_disabled: bool,
     pub cache_path: Option<&'a str>,
+    pub user_data_path: Option<&'a str>,
     pub persist_session_cookies: bool,
+    pub persist_user_preferences: bool,
     pub user_agent: Option<&'a str>,
     pub product_version: Option<&'a str>,
     pub locale: Option<&'a str>,
@@ -264,6 +264,7 @@ pub struct Settings<'a> {
     pub context_safety_implementation: bool,
     pub ignore_certificate_errors: bool,
     pub background_color: ffi::cef_color_t,
+    pub accept_language_list: Option<&'a str>,
 }
 
 impl<'a> Default for Settings<'a> {
@@ -276,7 +277,9 @@ impl<'a> Default for Settings<'a> {
             windowless_rendering_enabled: false,
             command_line_args_disabled: false,
             cache_path: None,
+            user_data_path: None,
             persist_session_cookies: false,
+            persist_user_preferences: false,
             user_agent: None,
             product_version: None,
             locale: None,
@@ -290,7 +293,8 @@ impl<'a> Default for Settings<'a> {
             uncaught_exception_stack_size: None,
             context_safety_implementation: false,
             ignore_certificate_errors: false,
-            background_color: Default::default()
+            background_color: Default::default(),
+            accept_language_list: None,
         }
     }
 }
@@ -298,7 +302,8 @@ impl<'a> Default for Settings<'a> {
 impl<'a> Settings<'a> {
     fn to_cef(&self) -> ffi::cef_settings_t {
         fn to_cef_str<'a>(s: Option<&'a str>) -> ffi::cef_string_t {
-            s.map(|x| CefString::from_str(x).cast()).unwrap_or_else(|| unsafe { zeroed() })
+            s.map(|x| CefString::from_str(x).cast())
+                .unwrap_or_else(|| unsafe { zeroed() })
         }
         ffi::cef_settings_t {
             size: size_of::<ffi::cef_settings_t>() as libc::size_t,
@@ -309,7 +314,9 @@ impl<'a> Settings<'a> {
             windowless_rendering_enabled: self.windowless_rendering_enabled as libc::c_int,
             command_line_args_disabled: self.command_line_args_disabled as libc::c_int,
             cache_path: to_cef_str(self.cache_path),
+            user_data_path: to_cef_str(self.user_data_path),
             persist_session_cookies: self.persist_session_cookies as libc::c_int,
+            persist_user_preferences: self.persist_user_preferences as libc::c_int,
             user_agent: to_cef_str(self.user_agent),
             product_version: to_cef_str(self.product_version),
             locale: to_cef_str(self.locale),
@@ -323,7 +330,8 @@ impl<'a> Settings<'a> {
             uncaught_exception_stack_size: self.uncaught_exception_stack_size.unwrap_or(0),
             context_safety_implementation: self.context_safety_implementation as libc::c_int,
             ignore_certificate_errors: self.ignore_certificate_errors as libc::c_int,
-            background_color: self.background_color
+            background_color: self.background_color,
+            accept_language_list: to_cef_str(self.accept_language_list),
         }
     }
 }
@@ -347,13 +355,13 @@ impl<'a> Default for WindowInfo<'a> {
             width: 0,
             height: 0,
             windowless_rendering_enabled: false,
-            transparent_painting_enabled: false
+            transparent_painting_enabled: false,
         }
     }
 }
 
 impl<'a> WindowInfo<'a> {
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     fn to_cef(&self) -> ffi::cef_window_info_t {
         use std::default::Default;
         let mut info: ffi::cef_window_info_t = Default::default();
@@ -365,7 +373,7 @@ impl<'a> WindowInfo<'a> {
         info.transparent_painting_enabled = CBool::new(self.transparent_painting_enabled).to_cef();
         info
     }
-    #[cfg(target_os="macos")]
+    #[cfg(target_os = "macos")]
     fn to_cef(&self) -> ffi::cef_window_info_t {
         use std::default::Default;
         let mut info: ffi::cef_window_info_t = Default::default();
@@ -380,7 +388,7 @@ impl<'a> WindowInfo<'a> {
         }
         info
     }
-    #[cfg(target_os="windows")]
+    #[cfg(target_os = "windows")]
     fn to_cef(&self) -> ffi::cef_window_info_t {
         use std::default::Default;
         let mut info: ffi::cef_window_info_t = Default::default();
@@ -401,49 +409,59 @@ impl<'a> WindowInfo<'a> {
     }
 }
 
-#[cfg(not(target_os="windows"))]
-fn with_args<T, F : FnOnce(ffi::cef_main_args_t) -> T>(f: F) -> T {
+#[cfg(not(target_os = "windows"))]
+fn with_args<T, F: FnOnce(ffi::cef_main_args_t) -> T>(f: F) -> T {
     use std::ffi::CString;
     let args: Vec<CString> = std::env::args().map(|x| CString::new(x).unwrap()).collect();
     println!("{:?}", args);
     let args: Vec<*mut libc::c_char> = args.iter().map(|x| x.as_ptr() as *mut _).collect();
     let args = &args;
-    let args_ = ffi::cef_main_args_t { argc: args.len() as libc::c_int, argv: args.as_ptr() as *mut _ };
+    let args_ = ffi::cef_main_args_t {
+        argc: args.len() as libc::c_int,
+        argv: args.as_ptr() as *mut _,
+    };
     let result = f(args_);
     drop(args);
     result
 }
 
-#[cfg(target_os="windows")]
-fn with_args<T, F : FnOnce(ffi::cef_main_args_t) -> T>(f: F) -> T {
+#[cfg(target_os = "windows")]
+fn with_args<T, F: FnOnce(ffi::cef_main_args_t) -> T>(f: F) -> T {
     use std::ptr::null;
     let args_ = ffi::cef_main_args_t {
-        instance: unsafe { kernel32::GetModuleHandleW(null()) } as ffi::HINSTANCE
+        instance: unsafe { winapi::um::libloaderapi::GetModuleHandleW(null()) } as ffi::HINSTANCE,
     };
     f(args_)
 }
 
-pub fn execute_process<T : App = Void>(app: Option<T>) -> isize {
+#[allow(invalid_type_param_default)]
+pub fn execute_process<T: App = Void>(app: Option<T>) -> isize {
     with_args(move |args| unsafe {
         ffi::cef_execute_process(
             &args as *const _,
-            app.map(|x| upcast_ptr(AppWrapper::new(x))).unwrap_or_else(|| zeroed()),
-            zeroed()) as isize
+            app.map(|x| upcast_ptr(AppWrapper::new(x)))
+                .unwrap_or_else(|| zeroed()),
+            zeroed(),
+        ) as isize
     })
 }
 
-pub fn initialize<T : App = Void>(settings: &Settings, app: Option<T>) -> bool {
+#[allow(invalid_type_param_default)]
+pub fn initialize<T: App = Void>(settings: &Settings, app: Option<T>) -> bool {
     let settings = settings.to_cef();
-    let result = with_args(move |args| unsafe{
+    let result = with_args(move |args| unsafe {
         ffi::cef_initialize(
             &args as *const _,
             &settings as *const _,
-            app.map(|x| upcast_ptr(AppWrapper::new(x))).unwrap_or_else(|| zeroed()), zeroed())
+            app.map(|x| upcast_ptr(AppWrapper::new(x)))
+                .unwrap_or_else(|| zeroed()),
+            zeroed(),
+        )
     });
     drop(settings);
     match result {
         0 => false,
-        _ => true
+        _ => true,
     }
 }
 
@@ -457,9 +475,9 @@ pub fn do_message_loop_work() {
 
 impl<T: Is<ffi::cef_base_t>> Drop for CefRc<T> {
     fn drop(&mut self) {
-        unsafe{
+        unsafe {
             if self.inner != std::ptr::null_mut()
-                && transmute::<_, usize>(self.inner) != ::std::mem::POST_DROP_USIZE
+            //&& transmute::<_, usize>(self.inner) != ::std::mem::POST_DROP_USIZE
             {
                 (*self.inner).release();
                 self.inner = std::ptr::null_mut();
@@ -470,7 +488,7 @@ impl<T: Is<ffi::cef_base_t>> Drop for CefRc<T> {
 
 impl<T: Is<ffi::cef_base_t>> Clone for CefRc<T> {
     fn clone(&self) -> CefRc<T> {
-        unsafe{ (*self.inner).add_ref() };
+        unsafe { (*self.inner).add_ref() };
         CefRc { inner: self.inner }
     }
 }
